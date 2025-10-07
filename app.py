@@ -520,10 +520,13 @@ def api_upload():
             df = pd.read_csv(filepath)
         else:
             df = pd.read_excel(filepath)
-        
-        if 'телефон' not in df.columns or 'ИНН' not in df.columns:
+
+        # Нормализуем названия столбцов (убираем пробелы и приводим к нижнему регистру)
+        df.columns = df.columns.str.strip().str.lower()
+
+        if 'телефон' not in df.columns or 'инн' not in df.columns:
             return jsonify({
-                "success": False, 
+                "success": False,
                 "message": "В файле должны быть столбцы 'телефон' и 'ИНН'"
             })
         
@@ -552,14 +555,17 @@ def api_send_checks():
             df = pd.read_csv(filepath)
         else:
             df = pd.read_excel(filepath)
-        
+
+        # Нормализуем названия столбцов (убираем пробелы и приводим к нижнему регистру)
+        df.columns = df.columns.str.strip().str.lower()
+
         sent = 0
         errors = 0
-        
+
         # Отправляем проверки
         for index, row in df.iterrows():
             phone = str(row['телефон'])
-            inn = str(row['ИНН'])
+            inn = str(row['инн'])
             
             result = send_check_to_bankiros(phone, inn)
             
