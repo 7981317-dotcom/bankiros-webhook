@@ -18,10 +18,10 @@ ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'csv'}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Настройки Bankiros (ЗАМЕНИ НА СВОИ!)
-BANKIROS_TOKEN = "твой_токен_здесь"  # ВАЖНО: Замени на реальный токен!
+BANKIROS_TOKEN = "kOjFk444n6txgf6DFps"  # ВАЖНО: Замени на реальный токен!
 BANKIROS_URL = "http://api.dev.mainfin.ru"  # Тестовый сервер
 POSTBACK_URL = "https://bankiros-webhook.onrender.com/bankiros/postback"
-OFFER_IDS = [320, 321]  # Тестовые МФО
+OFFER_IDS = [459]  # ID МФО для проверки
 
 # Инициализация базы данных
 def init_db():
