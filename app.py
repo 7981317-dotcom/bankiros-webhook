@@ -47,6 +47,26 @@ init_db()
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def format_phone_for_bankiros(phone):
+    """Форматирует телефон для API Bankiros в формат +7XXXXXXXXXX"""
+    # Убираем все нецифровые символы
+    digits = ''.join(filter(str.isdigit, phone))
+
+    # Если начинается с 7 и имеет 11 цифр (79XXXXXXXXX), преобразуем в +7XXXXXXXXXX
+    if digits.startswith('7') and len(digits) == 11:
+        return f"+{digits}"
+    # Если начинается с 8 и имеет 11 цифр (89XXXXXXXXX), заменяем 8 на +7
+    elif digits.startswith('8') and len(digits) == 11:
+        return f"+7{digits[1:]}"
+    # Если имеет 10 цифр (9XXXXXXXXX), добавляем +7
+    elif len(digits) == 10 and digits.startswith('9'):
+        return f"+7{digits}"
+    # В остальных случаях возвращаем как есть, добавив + если нужно
+    else:
+        if not digits.startswith('+'):
+            return f"+{digits}"
+        return digits
+
 # HTML шаблон веб-интерфейса
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -587,9 +607,12 @@ def api_send_checks():
             phone = str(row['телефон']).strip()
             inn = str(row['инн']).strip()
 
-            print(f"DEBUG: Обрабатываем строку {index + 1}: телефон={phone}, ИНН={inn}")
+            # Форматируем телефон правильно для API Bankiros
+            phone_formatted = format_phone_for_bankiros(phone)
 
-            result = send_check_to_bankiros(phone, inn)
+            print(f"DEBUG: Обрабатываем строку {index + 1}: телефон={phone} → {phone_formatted}, ИНН={inn}")
+
+            result = send_check_to_bankiros(phone_formatted, inn)
 
             if result['success']:
                 sent += 1
