@@ -446,13 +446,13 @@ HTML_TEMPLATE = '''
         }
         
         function sendChecks() {
-            if (!confirm('Начать массовую проверку?\\n\\nЭто может занять продолжительное время.')) {
+            if (!confirm('Начать массовую проверку?\\n\\nПервые 100 записей будут обработаны сразу, остальные - в фоновом режиме.')) {
                 return;
             }
             
             document.getElementById('sendBtn').disabled = true;
             document.getElementById('progressBar').style.display = 'block';
-            showMessage('sendMessage', 'info', '⏳ Отправляем проверки...');
+            showMessage('sendMessage', 'info', '⏳ Отправляем первые 100 проверок...');
             
             fetch('/api/send-checks', {
                 method: 'POST'
@@ -462,13 +462,18 @@ HTML_TEMPLATE = '''
                 document.getElementById('progressBar').style.display = 'none';
                 
                 if (data.success) {
-                    let message = `✅ Проверки отправлены!\\n\\nОтправлено: ${data.sent}\\nОшибок: ${data.errors}`;
+                    let message = `✅ ${data.message}\\n\\nОтправлено: ${data.sent}\\nОшибок: ${data.errors}\\nВсего записей: ${data.total}`;
                     if (data.error_details && data.error_details.length > 0) {
-                        message += `\\n\\n📋 Детали ошибок:\\n${data.error_details.join('\\n')}`;
+                        message += `\\n\\n📋 Первые ошибки:\\n${data.error_details.join('\\n')}`;
                     }
-                    message += `\\n\\nРезультаты придут через несколько часов.`;
+                    if (data.total > 100) {
+                        message += `\\n\\n⏳ Остальные ${data.total - 100} записей обрабатываются в фоне.\\nОбновляйте список файлов для отслеживания прогресса.`;
+                        // Автообновление списка файлов каждые 5 секунд
+                        startAutoRefresh();
+                    }
                     showMessage('sendMessage', 'success', message);
                     loadStats();
+                    loadFiles();
                 } else {
                     showMessage('sendMessage', 'error', `❌ ${data.message}`);
                 }
@@ -480,6 +485,29 @@ HTML_TEMPLATE = '''
                 showMessage('sendMessage', 'error', '❌ Ошибка отправки проверок');
                 document.getElementById('sendBtn').disabled = false;
             });
+        }
+        
+        let autoRefreshInterval = null;
+        
+        function startAutoRefresh() {
+            // Останавливаем предыдущий интервал если есть
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            
+            // Обновляем каждые 5 секунд
+            autoRefreshInterval = setInterval(() => {
+                loadFiles();
+                loadStats();
+            }, 5000);
+            
+            // Останавливаем через 5 минут
+            setTimeout(() => {
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }, 300000);
         }
         
         function downloadResults() {
@@ -715,7 +743,7 @@ def api_upload():
 
 @app.route('/api/send-checks', methods=['POST'])
 def api_send_checks():
-    """API: Отправить проверки"""
+    """API: Отправить проверки (только первые 100 записей, остальные обрабатываются фоново)"""
     try:
         # Получаем последний загруженный файл из БД
         conn = sqlite3.connect(DB_PATH)
@@ -746,71 +774,87 @@ def api_send_checks():
         # Читаем файл
         if filepath.endswith('.csv'):
             df = pd.read_csv(filepath)
-            print("DEBUG: Файл прочитан как CSV")
         else:
             df = pd.read_excel(filepath)
-            print("DEBUG: Файл прочитан как Excel")
 
-        print(f"DEBUG: Оригинальные столбцы: {list(df.columns)}")
         print(f"DEBUG: Размер файла: {len(df)} строк")
 
-        # Нормализуем названия столбцов (убираем пробелы и приводим к нижнему регистру)
+        # Нормализуем названия столбцов
         df.columns = df.columns.str.strip().str.lower()
-        print(f"DEBUG: Нормализованные столбцы: {list(df.columns)}")
 
         # Проверяем наличие обязательных столбцов
-        if 'телефон' not in df.columns:
-            return jsonify({"success": False, "message": f"Столбец 'телефон' не найден. Доступные столбцы: {list(df.columns)}"})
-
-        if 'инн' not in df.columns:
-            return jsonify({"success": False, "message": f"Столбец 'инн' не найден. Доступные столбцы: {list(df.columns)}"})
+        if 'телефон' not in df.columns or 'инн' not in df.columns:
+            return jsonify({"success": False, "message": "В файле должны быть столбцы 'телефон' и 'ИНН'"})
 
         sent = 0
         errors = 0
         error_details = []
-
-        # Отправляем проверки
-        for index, row in df.iterrows():
+        
+        # Обрабатываем только первые 100 записей в синхронном режиме
+        # Остальные будут обработаны фоново
+        batch_size = 100
+        total_records = len(df)
+        
+        for index, row in df.head(batch_size).iterrows():
             phone = str(row['телефон']).strip()
             inn = str(row['инн']).strip()
-
-            # Форматируем телефон правильно для API Bankiros
             phone_formatted = format_phone_for_bankiros(phone)
 
-            print(f"DEBUG: Обрабатываем строку {index + 1}: телефон={phone} → {phone_formatted}, ИНН={inn}")
+            print(f"DEBUG: [{index + 1}/{batch_size}] {phone} → {phone_formatted}, ИНН={inn}")
 
             result = send_check_to_bankiros(phone_formatted, inn, file_id)
 
             if result['success']:
                 sent += 1
-                print(f"DEBUG: Строка {index + 1} отправлена успешно, check_id={result.get('check_id')}")
             else:
                 errors += 1
-                error_msg = f"Строка {index + 1}: {result.get('error', 'Неизвестная ошибка')}"
-                error_details.append(error_msg)
-                print(f"DEBUG: Ошибка в строке {index + 1}: {error_msg}")
+                error_details.append(f"Строка {index + 1}: {result.get('error')}")
 
-        # Обновляем статус файла и статистику
+        # Сохраняем промежуточный результат
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE uploaded_files 
-            SET status = ?, sent_count = ?, error_count = ?, completed_at = ?
+            SET sent_count = ?, error_count = ?
             WHERE id = ?
-        ''', ('completed', sent, errors, datetime.now(), file_id))
+        ''', (sent, errors, file_id))
         conn.commit()
         conn.close()
+
+        # Запускаем фоновую обработку остальных записей
+        if total_records > batch_size:
+            import threading
+            thread = threading.Thread(
+                target=process_remaining_records,
+                args=(file_id, filepath, batch_size)
+            )
+            thread.daemon = True
+            thread.start()
+            
+            message = f"Первые {batch_size} записей отправлены! Остальные {total_records - batch_size} обрабатываются в фоне."
+        else:
+            # Обновляем статус на completed
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE uploaded_files 
+                SET status = ?, completed_at = ?
+                WHERE id = ?
+            ''', ('completed', datetime.now(), file_id))
+            conn.commit()
+            conn.close()
+            message = f"Все {total_records} записей отправлены!"
 
         response_data = {
             "success": True,
             "sent": sent,
-            "errors": errors
+            "errors": errors,
+            "total": total_records,
+            "message": message
         }
 
         if error_details:
-            response_data["error_details"] = error_details[:10]  # Показываем первые 10 ошибок
-
-        print(f"DEBUG: Итого отправлено: {sent}, ошибок: {errors}")
+            response_data["error_details"] = error_details[:10]
 
         return jsonify(response_data)
 
@@ -819,6 +863,80 @@ def api_send_checks():
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
+
+def process_remaining_records(file_id, filepath, start_index):
+    """Фоновая обработка оставшихся записей"""
+    try:
+        print(f"DEBUG: Начинаем фоновую обработку с индекса {start_index}")
+        
+        # Читаем файл
+        if filepath.endswith('.csv'):
+            df = pd.read_csv(filepath)
+        else:
+            df = pd.read_excel(filepath)
+        
+        df.columns = df.columns.str.strip().str.lower()
+        
+        sent = 0
+        errors = 0
+        
+        # Обрабатываем записи начиная с start_index
+        for index, row in df.iloc[start_index:].iterrows():
+            phone = str(row['телефон']).strip()
+            inn = str(row['инн']).strip()
+            phone_formatted = format_phone_for_bankiros(phone)
+            
+            print(f"DEBUG: Фон [{index + 1}/{len(df)}] {phone_formatted}")
+            
+            result = send_check_to_bankiros(phone_formatted, inn, file_id)
+            
+            if result['success']:
+                sent += 1
+            else:
+                errors += 1
+            
+            # Обновляем прогресс каждые 10 записей
+            if (index - start_index + 1) % 10 == 0:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE uploaded_files 
+                    SET sent_count = sent_count + ?, error_count = error_count + ?
+                    WHERE id = ?
+                ''', (sent, errors, file_id))
+                conn.commit()
+                conn.close()
+                sent = 0
+                errors = 0
+                
+                # Пауза чтобы не перегружать API
+                import time
+                time.sleep(1)
+        
+        # Финальное обновление
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE uploaded_files 
+            SET status = ?, sent_count = sent_count + ?, error_count = error_count + ?, completed_at = ?
+            WHERE id = ?
+        ''', ('completed', sent, errors, datetime.now(), file_id))
+        conn.commit()
+        conn.close()
+        
+        print(f"DEBUG: Фоновая обработка завершена. Отправлено: {sent}, ошибок: {errors}")
+        
+    except Exception as e:
+        print(f"DEBUG: Ошибка в фоновой обработке: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # Помечаем файл как failed
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE uploaded_files SET status = ? WHERE id = ?', ('failed', file_id))
+        conn.commit()
+        conn.close()
 
 def send_check_to_bankiros(phone, employer_inn, file_id=None):
     """Отправка проверки в Bankiros API"""
