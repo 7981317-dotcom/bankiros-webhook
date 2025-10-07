@@ -19,9 +19,9 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Настройки Bankiros (ЗАМЕНИ НА СВОИ!)
 BANKIROS_TOKEN = "kOjFk444n6txgf6DFps"  # ВАЖНО: Замени на реальный токен!
-BANKIROS_URL = "http://api.dev.mainfin.ru"  # Тестовый сервер
+BANKIROS_URL = "https://api.mainfin.ru"  # Production сервер
 POSTBACK_URL = "https://bankiros-webhook.onrender.com/bankiros/postback"
-OFFER_IDS = [459]  # ID МФО для проверки
+OFFER_IDS = [459]  # ID МФО для проверки (Альфа банк РКО)
 
 # Инициализация базы данных
 def init_db():
