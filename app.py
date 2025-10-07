@@ -399,9 +399,12 @@ HTML_TEMPLATE = '''
                 document.getElementById('progressBar').style.display = 'none';
                 
                 if (data.success) {
-                    showMessage('sendMessage', 'success', 
-                        `✅ Проверки отправлены!\\n\\nОтправлено: ${data.sent}\\nОшибок: ${data.errors}\\n\\nРезультаты придут через несколько часов.`
-                    );
+                    let message = `✅ Проверки отправлены!\\n\\nОтправлено: ${data.sent}\\nОшибок: ${data.errors}`;
+                    if (data.error_details && data.error_details.length > 0) {
+                        message += `\\n\\n📋 Детали ошибок:\\n${data.error_details.join('\\n')}`;
+                    }
+                    message += `\\n\\nРезультаты придут через несколько часов.`;
+                    showMessage('sendMessage', 'success', message);
                     loadStats();
                 } else {
                     showMessage('sendMessage', 'error', `❌ ${data.message}`);
@@ -545,42 +548,75 @@ def api_send_checks():
     try:
         # Находим загруженный файл
         files = os.listdir(UPLOAD_FOLDER)
+        print(f"DEBUG: Файлы в uploads: {files}")
+
         if not files:
             return jsonify({"success": False, "message": "Файл не найден. Сначала загрузите файл."})
-        
+
         filepath = os.path.join(UPLOAD_FOLDER, files[0])
-        
+        print(f"DEBUG: Обрабатываем файл: {filepath}")
+
         # Читаем файл
         if filepath.endswith('.csv'):
             df = pd.read_csv(filepath)
+            print("DEBUG: Файл прочитан как CSV")
         else:
             df = pd.read_excel(filepath)
+            print("DEBUG: Файл прочитан как Excel")
+
+        print(f"DEBUG: Оригинальные столбцы: {list(df.columns)}")
+        print(f"DEBUG: Размер файла: {len(df)} строк")
 
         # Нормализуем названия столбцов (убираем пробелы и приводим к нижнему регистру)
         df.columns = df.columns.str.strip().str.lower()
+        print(f"DEBUG: Нормализованные столбцы: {list(df.columns)}")
+
+        # Проверяем наличие обязательных столбцов
+        if 'телефон' not in df.columns:
+            return jsonify({"success": False, "message": f"Столбец 'телефон' не найден. Доступные столбцы: {list(df.columns)}"})
+
+        if 'инн' not in df.columns:
+            return jsonify({"success": False, "message": f"Столбец 'инн' не найден. Доступные столбцы: {list(df.columns)}"})
 
         sent = 0
         errors = 0
+        error_details = []
 
         # Отправляем проверки
         for index, row in df.iterrows():
-            phone = str(row['телефон'])
-            inn = str(row['инн'])
-            
+            phone = str(row['телефон']).strip()
+            inn = str(row['инн']).strip()
+
+            print(f"DEBUG: Обрабатываем строку {index + 1}: телефон={phone}, ИНН={inn}")
+
             result = send_check_to_bankiros(phone, inn)
-            
+
             if result['success']:
                 sent += 1
+                print(f"DEBUG: Строка {index + 1} отправлена успешно, check_id={result.get('check_id')}")
             else:
                 errors += 1
-        
-        return jsonify({
+                error_msg = f"Строка {index + 1}: {result.get('error', 'Неизвестная ошибка')}"
+                error_details.append(error_msg)
+                print(f"DEBUG: Ошибка в строке {index + 1}: {error_msg}")
+
+        response_data = {
             "success": True,
             "sent": sent,
             "errors": errors
-        })
-        
+        }
+
+        if error_details:
+            response_data["error_details"] = error_details[:10]  # Показываем первые 10 ошибок
+
+        print(f"DEBUG: Итого отправлено: {sent}, ошибок: {errors}")
+
+        return jsonify(response_data)
+
     except Exception as e:
+        print(f"DEBUG: Критическая ошибка: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
 
 def send_check_to_bankiros(phone, employer_inn):
