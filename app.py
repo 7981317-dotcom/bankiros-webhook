@@ -725,7 +725,26 @@ def api_send_checks():
             return jsonify({"success": False, "message": "Файл не найден. Сначала загрузите файл."})
 
         filepath = os.path.join(UPLOAD_FOLDER, files[0])
+        filename = os.path.basename(filepath)
         print(f"DEBUG: Обрабатываем файл: {filepath}")
+
+        # Получаем file_id из БД
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM uploaded_files WHERE filename = ? ORDER BY created_at DESC LIMIT 1', (filename,))
+        result = cursor.fetchone()
+        
+        if not result:
+            conn.close()
+            return jsonify({"success": False, "message": "Файл не найден в базе данных"})
+        
+        file_id = result[0]
+        print(f"DEBUG: file_id = {file_id}")
+
+        # Обновляем статус файла на 'processing'
+        cursor.execute('UPDATE uploaded_files SET status = ? WHERE id = ?', ('processing', file_id))
+        conn.commit()
+        conn.close()
 
         # Читаем файл
         if filepath.endswith('.csv'):
@@ -763,7 +782,7 @@ def api_send_checks():
 
             print(f"DEBUG: Обрабатываем строку {index + 1}: телефон={phone} → {phone_formatted}, ИНН={inn}")
 
-            result = send_check_to_bankiros(phone_formatted, inn)
+            result = send_check_to_bankiros(phone_formatted, inn, file_id)
 
             if result['success']:
                 sent += 1
@@ -773,6 +792,17 @@ def api_send_checks():
                 error_msg = f"Строка {index + 1}: {result.get('error', 'Неизвестная ошибка')}"
                 error_details.append(error_msg)
                 print(f"DEBUG: Ошибка в строке {index + 1}: {error_msg}")
+
+        # Обновляем статус файла и статистику
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE uploaded_files 
+            SET status = ?, sent_count = ?, error_count = ?, completed_at = ?
+            WHERE id = ?
+        ''', ('completed', sent, errors, datetime.now(), file_id))
+        conn.commit()
+        conn.close()
 
         response_data = {
             "success": True,
