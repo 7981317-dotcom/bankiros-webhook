@@ -969,36 +969,79 @@ def api_files():
 
 @app.route('/api/download-file/<int:file_id>')
 def api_download_file(file_id):
-    """API: Скачать результаты по конкретному файлу"""
+    """API: Скачать результаты по конкретному файлу с сохранением всех исходных данных"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
         # Получаем информацию о файле
-        cursor.execute('SELECT original_filename FROM uploaded_files WHERE id = ?', (file_id,))
+        cursor.execute('SELECT filename, original_filename FROM uploaded_files WHERE id = ?', (file_id,))
         result = cursor.fetchone()
         if not result:
+            conn.close()
             return jsonify({"success": False, "message": "Файл не найден"})
 
-        filename = result[0]
-
-        # Получаем результаты по файлу
-        df = pd.read_sql_query('''
-            SELECT fc.phone as "Телефон",
-                   fc.employer_inn as "ИНН",
-                   c.status as "Статус проверки",
-                   c.offer_id as "ID МФО",
-                   c.updated_at as "Дата проверки"
+        filename, original_filename = result
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        
+        # Проверяем существование файла
+        if not os.path.exists(filepath):
+            conn.close()
+            return jsonify({"success": False, "message": "Исходный файл не найден на диске"})
+        
+        # Читаем исходный файл
+        if filepath.endswith('.csv'):
+            df = pd.read_csv(filepath)
+        else:
+            df = pd.read_excel(filepath)
+        
+        # Нормализуем столбцы для поиска
+        df_normalized = df.copy()
+        df_normalized.columns = df_normalized.columns.str.strip().str.lower()
+        
+        # Добавляем столбцы для результатов (если их нет)
+        if 'Check ID' not in df.columns:
+            df['Check ID'] = ''
+        if 'Статус проверки' not in df.columns:
+            df['Статус проверки'] = ''
+        if 'ID МФО' not in df.columns:
+            df['ID МФО'] = ''
+        if 'Дата проверки' not in df.columns:
+            df['Дата проверки'] = ''
+        
+        # Получаем результаты из БД
+        cursor.execute('''
+            SELECT fc.phone, c.check_id, c.status, c.offer_id, c.updated_at
             FROM file_checks fc
             JOIN checks c ON fc.check_id = c.check_id
             WHERE fc.file_id = ?
-            ORDER BY c.updated_at DESC
-        ''', conn, params=(file_id,))
-
+        ''', (file_id,))
+        
+        results = cursor.fetchall()
         conn.close()
-
-        if df.empty:
-            return jsonify({"success": False, "message": "Результаты еще не готовы"})
+        
+        # Создаем словарь для быстрого поиска
+        results_dict = {}
+        for phone, check_id, status, offer_id, updated_at in results:
+            phone_key = ''.join(filter(str.isdigit, str(phone)))
+            results_dict[phone_key] = {
+                'check_id': check_id,
+                'status': status,
+                'offer_id': offer_id,
+                'updated_at': updated_at
+            }
+        
+        # Обновляем DataFrame результатами
+        for index, row in df_normalized.iterrows():
+            phone = str(row['телефон']).strip()
+            phone_key = ''.join(filter(str.isdigit, phone))
+            
+            if phone_key in results_dict:
+                result = results_dict[phone_key]
+                df.at[index, 'Check ID'] = result['check_id']
+                df.at[index, 'Статус проверки'] = result['status'] or 'pending'
+                df.at[index, 'ID МФО'] = result['offer_id'] or ''
+                df.at[index, 'Дата проверки'] = result['updated_at'] or ''
 
         # Создаем Excel в памяти
         output = io.BytesIO()
@@ -1010,7 +1053,7 @@ def api_download_file(file_id):
             output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name=f'{filename}_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+            download_name=f'{original_filename}_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
         )
 
     except Exception as e:
