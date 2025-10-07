@@ -27,6 +27,8 @@ OFFER_IDS = [459]  # ID МФО для проверки (Альфа банк РК
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # Таблица проверок
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS checks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +41,35 @@ def init_db():
             updated_at TIMESTAMP
         )
     ''')
+
+    # Таблица загруженных файлов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uploaded_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT,
+            original_filename TEXT,
+            records_count INTEGER,
+            sent_count INTEGER,
+            error_count INTEGER,
+            status TEXT,  -- 'uploaded', 'processing', 'completed', 'failed'
+            created_at TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+    ''')
+
+    # Связь проверок с файлами
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS file_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER,
+            check_id INTEGER,
+            phone TEXT,
+            employer_inn TEXT,
+            FOREIGN KEY (file_id) REFERENCES uploaded_files (id),
+            FOREIGN KEY (check_id) REFERENCES checks (check_id)
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -334,12 +365,24 @@ HTML_TEMPLATE = '''
             <div id="sendMessage" class="message"></div>
         </div>
         
-        <!-- Раздел 3: Скачивание результатов -->
+        <!-- Раздел 3: История файлов -->
         <div class="section">
-            <h2>📥 Шаг 3: Скачать результаты</h2>
-            <p style="margin-bottom: 20px; color: #7f8c8d;">Скачайте файл с результатами проверок</p>
+            <h2>📋 История проверок</h2>
+            <p style="margin-bottom: 20px; color: #7f8c8d;">Список загруженных файлов и их статус</p>
+            <div id="filesList" style="margin-bottom: 20px;">
+                <p style="color: #7f8c8d;">Загружаем список файлов...</p>
+            </div>
+            <button class="btn btn-success" onclick="loadFiles()">
+                🔄 Обновить список
+            </button>
+        </div>
+
+        <!-- Раздел 4: Скачивание результатов -->
+        <div class="section">
+            <h2>📥 Скачать результаты</h2>
+            <p style="margin-bottom: 20px; color: #7f8c8d;">Скачайте файл с результатами всех проверок</p>
             <button class="btn btn-success" onclick="downloadResults()">
-                💾 Скачать результаты (Excel)
+                💾 Скачать все результаты (Excel)
             </button>
             <div id="downloadMessage" class="message"></div>
         </div>
@@ -472,12 +515,105 @@ HTML_TEMPLATE = '''
             });
         }
         
+        function loadFiles() {
+            const filesList = document.getElementById('filesList');
+            filesList.innerHTML = '<p style="color: #7f8c8d;">Загружаем список файлов...</p>';
+
+            fetch('/api/files')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.files && data.files.length > 0) {
+                        let html = '<div style="display: grid; gap: 15px;">';
+
+                        data.files.forEach(file => {
+                            const statusText = getStatusText(file.status);
+                            const statusColor = getStatusColor(file.status);
+
+                            html += `
+                                <div style="border: 1px solid #ddd; border-radius: 10px; padding: 15px; background: white;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                        <h4 style="margin: 0; color: #2C3E50;">${file.filename}</h4>
+                                        <span style="background: ${statusColor}; color: white; padding: 5px 10px; border-radius: 5px; font-size: 0.8em;">${statusText}</span>
+                                    </div>
+                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 15px;">
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 1.5em; font-weight: bold; color: #667eea;">${file.records_count}</div>
+                                            <div style="font-size: 0.8em; color: #7f8c8d;">Всего записей</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 1.5em; font-weight: bold; color: #28a745;">${file.not_duplicates}</div>
+                                            <div style="font-size: 0.8em; color: #7f8c8d;">Новых клиентов</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 1.5em; font-weight: bold; color: #dc3545;">${file.duplicates}</div>
+                                            <div style="font-size: 0.8em; color: #7f8c8d;">Дублей</div>
+                                        </div>
+                                        <div style="text-align: center;">
+                                            <div style="font-size: 1.5em; font-weight: bold; color: #ffc107;">${file.pending}</div>
+                                            <div style="font-size: 0.8em; color: #7f8c8d;">В обработке</div>
+                                        </div>
+                                    </div>
+                                    <div style="display: flex; gap: 10px;">
+                                        <button class="btn btn-success" style="font-size: 0.9em; padding: 8px 15px;" onclick="downloadFileResults(${file.id}, '${file.filename}')">
+                                            💾 Скачать результаты
+                                        </button>
+                                        <div style="font-size: 0.8em; color: #7f8c8d; align-self: center;">
+                                            Загружен: ${new Date(file.created_at).toLocaleString('ru-RU')}
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+
+                        html += '</div>';
+                        filesList.innerHTML = html;
+                    } else {
+                        filesList.innerHTML = '<p style="color: #7f8c8d;">Файлы еще не загружались</p>';
+                    }
+                })
+                .catch(error => {
+                    filesList.innerHTML = '<p style="color: #dc3545;">Ошибка загрузки списка файлов</p>';
+                });
+        }
+
+        function getStatusText(status) {
+            switch(status) {
+                case 'uploaded': return 'Загружен';
+                case 'processing': return 'Обрабатывается';
+                case 'completed': return 'Готово';
+                case 'failed': return 'Ошибка';
+                default: return status;
+            }
+        }
+
+        function getStatusColor(status) {
+            switch(status) {
+                case 'uploaded': return '#17a2b8';
+                case 'processing': return '#ffc107';
+                case 'completed': return '#28a745';
+                case 'failed': return '#dc3545';
+                default: return '#6c757d';
+            }
+        }
+
+        function downloadFileResults(fileId, filename) {
+            showMessage('downloadMessage', 'info', `⏳ Формируем результаты для ${filename}...`);
+            window.location.href = `/api/download-file/${fileId}`;
+
+            setTimeout(() => {
+                showMessage('downloadMessage', 'success', '✅ Файл скачан!');
+            }, 1000);
+        }
+
+        // Загружаем список файлов при открытии страницы
+        loadFiles();
+
         function showMessage(elementId, type, text) {
             const element = document.getElementById(elementId);
             element.className = `message ${type}`;
             element.textContent = text;
             element.style.display = 'block';
-            
+
             setTimeout(() => {
                 element.style.display = 'none';
             }, 10000);
@@ -524,20 +660,21 @@ def api_upload():
     """API: Загрузить файл"""
     if 'file' not in request.files:
         return jsonify({"success": False, "message": "Файл не выбран"})
-    
+
     file = request.files['file']
-    
+
     if file.filename == '':
         return jsonify({"success": False, "message": "Файл не выбран"})
-    
+
     if not allowed_file(file.filename):
         return jsonify({"success": False, "message": "Недопустимый формат файла"})
-    
+
     try:
         filename = secure_filename(file.filename)
-        filepath = os.path.join(UPLOAD_FOLDER, 'clients.' + filename.rsplit('.', 1)[1])
+        original_filename = file.filename
+        filepath = os.path.join(UPLOAD_FOLDER, f'clients_{int(datetime.now().timestamp())}.' + filename.rsplit('.', 1)[1])
         file.save(filepath)
-        
+
         # Проверяем файл
         if filepath.endswith('.csv'):
             df = pd.read_csv(filepath)
@@ -552,13 +689,27 @@ def api_upload():
                 "success": False,
                 "message": "В файле должны быть столбцы 'телефон' и 'ИНН'"
             })
-        
+
+        records_count = len(df)
+
+        # Сохраняем информацию о файле в БД
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO uploaded_files (filename, original_filename, records_count, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (os.path.basename(filepath), original_filename, records_count, 'uploaded', datetime.now()))
+        file_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
         return jsonify({
             "success": True,
-            "message": "Файл успешно загружен",
-            "records": len(df)
+            "message": f"Файл '{original_filename}' успешно загружен",
+            "records": records_count,
+            "file_id": file_id
         })
-        
+
     except Exception as e:
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
 
@@ -642,13 +793,13 @@ def api_send_checks():
         traceback.print_exc()
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
 
-def send_check_to_bankiros(phone, employer_inn):
+def send_check_to_bankiros(phone, employer_inn, file_id=None):
     """Отправка проверки в Bankiros API"""
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Token {BANKIROS_TOKEN}"
     }
-    
+
     payload = {
         "offerIds": OFFER_IDS,
         "formData": {
@@ -658,7 +809,7 @@ def send_check_to_bankiros(phone, employer_inn):
         },
         "postbackUrl": POSTBACK_URL
     }
-    
+
     try:
         response = requests.post(
             f"{BANKIROS_URL}/offers_partners_v1/partner-check-phone/import",
@@ -666,11 +817,11 @@ def send_check_to_bankiros(phone, employer_inn):
             json=payload,
             timeout=10
         )
-        
+
         if response.status_code == 200:
             result = response.json()
             check_id = result.get('id')
-            
+
             # Сохраняем в БД
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -678,13 +829,21 @@ def send_check_to_bankiros(phone, employer_inn):
                 INSERT OR IGNORE INTO checks (check_id, phone, employer_inn, status, created_at)
                 VALUES (?, ?, ?, ?, ?)
             ''', (check_id, phone, employer_inn, 'pending', datetime.now()))
+
+            # Сохраняем связь с файлом, если указан file_id
+            if file_id:
+                cursor.execute('''
+                    INSERT INTO file_checks (file_id, check_id, phone, employer_inn)
+                    VALUES (?, ?, ?, ?)
+                ''', (file_id, check_id, phone, employer_inn))
+
             conn.commit()
             conn.close()
-            
+
             return {"success": True, "check_id": check_id}
         else:
             return {"success": False, "error": f"HTTP {response.status_code}"}
-            
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -720,6 +879,116 @@ def api_download_results():
     except Exception as e:
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
 
+@app.route('/api/files')
+def api_files():
+    """API: Получить список загруженных файлов"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, original_filename, records_count, sent_count, error_count,
+                   status, created_at, completed_at
+            FROM uploaded_files
+            ORDER BY created_at DESC
+            LIMIT 10
+        ''')
+
+        files = []
+        for row in cursor.fetchall():
+            file_id, original_filename, records_count, sent_count, error_count, status, created_at, completed_at = row
+
+            # Получаем статистику по файлу
+            cursor.execute('''
+                SELECT COUNT(*) FROM file_checks fc
+                JOIN checks c ON fc.check_id = c.check_id
+                WHERE fc.file_id = ? AND c.status = 'duplicate'
+            ''', (file_id,))
+            duplicates = cursor.fetchone()[0]
+
+            cursor.execute('''
+                SELECT COUNT(*) FROM file_checks fc
+                JOIN checks c ON fc.check_id = c.check_id
+                WHERE fc.file_id = ? AND c.status = 'not_duplicate'
+            ''', (file_id,))
+            not_duplicates = cursor.fetchone()[0]
+
+            cursor.execute('''
+                SELECT COUNT(*) FROM file_checks fc
+                JOIN checks c ON fc.check_id = c.check_id
+                WHERE fc.file_id = ? AND (c.status = 'pending' OR c.status IS NULL)
+            ''', (file_id,))
+            pending = cursor.fetchone()[0]
+
+            files.append({
+                "id": file_id,
+                "filename": original_filename,
+                "records_count": records_count,
+                "sent_count": sent_count or 0,
+                "error_count": error_count or 0,
+                "status": status,
+                "created_at": created_at,
+                "completed_at": completed_at,
+                "duplicates": duplicates,
+                "not_duplicates": not_duplicates,
+                "pending": pending
+            })
+
+        conn.close()
+        return jsonify({"files": files})
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
+
+@app.route('/api/download-file/<int:file_id>')
+def api_download_file(file_id):
+    """API: Скачать результаты по конкретному файлу"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Получаем информацию о файле
+        cursor.execute('SELECT original_filename FROM uploaded_files WHERE id = ?', (file_id,))
+        result = cursor.fetchone()
+        if not result:
+            return jsonify({"success": False, "message": "Файл не найден"})
+
+        filename = result[0]
+
+        # Получаем результаты по файлу
+        df = pd.read_sql_query('''
+            SELECT fc.phone as "Телефон",
+                   fc.employer_inn as "ИНН",
+                   c.status as "Статус проверки",
+                   c.offer_id as "ID МФО",
+                   c.updated_at as "Дата проверки"
+            FROM file_checks fc
+            JOIN checks c ON fc.check_id = c.check_id
+            WHERE fc.file_id = ?
+            ORDER BY c.updated_at DESC
+        ''', conn, params=(file_id,))
+
+        conn.close()
+
+        if df.empty:
+            return jsonify({"success": False, "message": "Результаты еще не готовы"})
+
+        # Создаем Excel в памяти
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Результаты')
+        output.seek(0)
+
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'{filename}_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        )
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
+
 @app.route('/api/clear-database', methods=['POST'])
 def api_clear_database():
     """API: Очистить базу данных"""
@@ -727,15 +996,17 @@ def api_clear_database():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM checks')
+        cursor.execute('DELETE FROM uploaded_files')
+        cursor.execute('DELETE FROM file_checks')
         conn.commit()
         conn.close()
-        
+
         # Удаляем загруженные файлы
         for file in os.listdir(UPLOAD_FOLDER):
             os.remove(os.path.join(UPLOAD_FOLDER, file))
-        
+
         return jsonify({"success": True})
-        
+
     except Exception as e:
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
 
