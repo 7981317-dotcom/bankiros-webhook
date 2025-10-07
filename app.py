@@ -717,29 +717,26 @@ def api_upload():
 def api_send_checks():
     """API: Отправить проверки"""
     try:
-        # Находим загруженный файл
-        files = os.listdir(UPLOAD_FOLDER)
-        print(f"DEBUG: Файлы в uploads: {files}")
-
-        if not files:
-            return jsonify({"success": False, "message": "Файл не найден. Сначала загрузите файл."})
-
-        filepath = os.path.join(UPLOAD_FOLDER, files[0])
-        filename = os.path.basename(filepath)
-        print(f"DEBUG: Обрабатываем файл: {filepath}")
-
-        # Получаем file_id из БД
+        # Получаем последний загруженный файл из БД
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM uploaded_files WHERE filename = ? ORDER BY created_at DESC LIMIT 1', (filename,))
+        cursor.execute('SELECT id, filename FROM uploaded_files ORDER BY created_at DESC LIMIT 1')
         result = cursor.fetchone()
         
         if not result:
             conn.close()
-            return jsonify({"success": False, "message": "Файл не найден в базе данных"})
+            return jsonify({"success": False, "message": "Файл не найден. Сначала загрузите файл."})
         
-        file_id = result[0]
+        file_id, filename = result
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        
         print(f"DEBUG: file_id = {file_id}")
+        print(f"DEBUG: Обрабатываем файл: {filepath}")
+        
+        # Проверяем существование файла
+        if not os.path.exists(filepath):
+            conn.close()
+            return jsonify({"success": False, "message": f"Файл {filename} не найден на диске"})
 
         # Обновляем статус файла на 'processing'
         cursor.execute('UPDATE uploaded_files SET status = ? WHERE id = ?', ('processing', file_id))
