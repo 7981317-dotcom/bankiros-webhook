@@ -14,12 +14,13 @@ def export_results_to_excel(input_file, output_file=None, db_path='checks.db'):
     # Читаем исходный файл
     if input_file.endswith('.csv'):
         df = pd.read_csv(input_file)
-        if output_file is None:
-            output_file = input_file.replace('.csv', '_results.csv')
     else:
         df = pd.read_excel(input_file)
-        if output_file is None:
-            output_file = input_file.replace('.xlsx', '_results.xlsx').replace('.xls', '_results.xlsx')
+
+    # По умолчанию всегда создаем Excel файл
+    if output_file is None:
+        base_name = input_file.rsplit('.', 1)[0]  # Убираем расширение
+        output_file = f"{base_name}_results.xlsx"
     
     # Подключаемся к БД
     conn = sqlite3.connect(db_path)
@@ -53,7 +54,11 @@ def export_results_to_excel(input_file, output_file=None, db_path='checks.db'):
         'offer_id': 'ID МФО',
         'updated_at': 'Дата проверки'
     })
-    
+
+    # Форматируем дату без микросекунд
+    if 'Дата проверки' in merged.columns:
+        merged['Дата проверки'] = pd.to_datetime(merged['Дата проверки']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
     # Удаляем служебные колонки
     merged = merged.drop(columns=['phone', 'employer_inn'], errors='ignore')
     

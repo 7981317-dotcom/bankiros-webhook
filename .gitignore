@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .env
 venv/
+checks.db
+*.xlsx
+*.csv
