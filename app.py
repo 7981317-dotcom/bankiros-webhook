@@ -78,6 +78,25 @@ init_db()
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def normalize_phone_for_matching(phone):
+    """
+    Нормализует телефон для сопоставления (убирает +7, 8, оставляет только 10 цифр)
+    Например: +79123456789, 89123456789, 9123456789 -> 9123456789
+    """
+    digits = ''.join(filter(str.isdigit, str(phone)))
+
+    # Если начинается с 7 и 11 цифр -> убираем 7
+    if digits.startswith('7') and len(digits) == 11:
+        return digits[1:]  # возвращаем 9XXXXXXXXX
+    # Если начинается с 8 и 11 цифр -> убираем 8
+    elif digits.startswith('8') and len(digits) == 11:
+        return digits[1:]  # возвращаем 9XXXXXXXXX
+    # Если 10 цифр и начинается с 9
+    elif len(digits) == 10 and digits.startswith('9'):
+        return digits  # возвращаем как есть
+    else:
+        return digits  # возвращаем всё что есть
+
 def format_phone_for_bankiros(phone):
     """Форматирует телефон для API Bankiros в формат +7XXXXXXXXXX"""
     # Убираем все нецифровые символы
@@ -817,7 +836,7 @@ def api_send_checks():
             inn = str(row['инн']).strip()
             phone_formatted = format_phone_for_bankiros(phone)
 
-            print(f"DEBUG: [{index + 1}/{batch_size}] phone='{phone}' → '{phone_formatted}', inn='{inn}'")
+            print(f"DEBUG: [{index + 1}/{batch_size}] phone='{phone}' -> '{phone_formatted}', inn='{inn}'")
 
             result = send_check_to_bankiros(phone_formatted, inn, file_id)
 
@@ -915,7 +934,7 @@ def process_remaining_records(file_id, filepath, start_index):
             inn = str(row['инн']).strip()
             phone_formatted = format_phone_for_bankiros(phone)
             
-            print(f"DEBUG: Фон [{index + 1}/{len(df)}] phone='{phone}' → '{phone_formatted}', inn='{inn}'")
+            print(f"DEBUG: Фон [{index + 1}/{len(df)}] phone='{phone}' -> '{phone_formatted}', inn='{inn}'")
             
             result = send_check_to_bankiros(phone_formatted, inn, file_id)
             
@@ -1044,7 +1063,8 @@ def api_download_results():
     try:
         conn = sqlite3.connect(DB_PATH)
         df = pd.read_sql_query('''
-            SELECT phone as "Телефон", 
+            SELECT check_id as "Check ID",
+                   phone as "Телефон",
                    employer_inn as "ИНН",
                    status as "Статус проверки",
                    offer_id as "ID МФО",
@@ -1053,6 +1073,19 @@ def api_download_results():
             ORDER BY updated_at DESC
         ''', conn)
         conn.close()
+
+        # Добавляем понятную метку "Результат"
+        def get_result_label(status):
+            if status == 'duplicate':
+                return '❌ ДУБЛЬ'
+            elif status == 'not_duplicate':
+                return '✅ НОВЫЙ КЛИЕНТ'
+            elif status == 'pending':
+                return '⏳ В обработке'
+            else:
+                return '❓ Неизвестно'
+
+        df.insert(3, 'Результат', df['Статус проверки'].apply(get_result_label))
         
         # Создаем Excel в памяти
         output = io.BytesIO()
@@ -1166,6 +1199,8 @@ def api_download_file(file_id):
         # Добавляем столбцы для результатов (если их нет)
         if 'Check ID' not in df.columns:
             df['Check ID'] = ''
+        if 'Результат' not in df.columns:
+            df['Результат'] = ''
         if 'Статус проверки' not in df.columns:
             df['Статус проверки'] = ''
         if 'ID МФО' not in df.columns:
@@ -1187,7 +1222,7 @@ def api_download_file(file_id):
         # Создаем словарь для быстрого поиска по (phone_key, inn)
         results_dict = {}
         for phone, inn, check_id, status, offer_id, updated_at in results:
-            phone_key = ''.join(filter(str.isdigit, str(phone)))
+            phone_key = normalize_phone_for_matching(phone)  # нормализуем телефон
             inn_key = str(inn).strip()
             composite_key = (phone_key, inn_key)
             results_dict[composite_key] = {
@@ -1196,19 +1231,30 @@ def api_download_file(file_id):
                 'offer_id': offer_id,
                 'updated_at': updated_at
             }
-        
+
         # Обновляем DataFrame результатами
         updated_count = 0
         for index, row in df_normalized.iterrows():
             phone = str(row['телефон']).strip()
             inn = str(row['инн']).strip()
-            phone_key = ''.join(filter(str.isdigit, phone))
+            phone_key = normalize_phone_for_matching(phone)  # нормализуем телефон
             composite_key = (phone_key, inn)
-            
+
             if composite_key in results_dict:
                 result = results_dict[composite_key]
+                status = result['status'] or 'pending'
+
+                # Понятная метка для пользователя
+                if status == 'duplicate':
+                    result_label = '❌ ДУБЛЬ'
+                elif status == 'not_duplicate':
+                    result_label = '✅ НОВЫЙ КЛИЕНТ'
+                else:
+                    result_label = '⏳ В обработке'
+
                 df.at[index, 'Check ID'] = result['check_id']
-                df.at[index, 'Статус проверки'] = result['status'] or 'pending'
+                df.at[index, 'Результат'] = result_label
+                df.at[index, 'Статус проверки'] = status
                 df.at[index, 'ID МФО'] = result['offer_id'] or ''
                 df.at[index, 'Дата проверки'] = result['updated_at'] or ''
                 updated_count += 1
