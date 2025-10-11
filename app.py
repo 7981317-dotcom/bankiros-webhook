@@ -745,6 +745,8 @@ def api_upload():
 def api_send_checks():
     """API: Отправить проверки (только первые 100 записей, остальные обрабатываются фоново)"""
     try:
+        print("DEBUG: api_send_checks вызвана")
+        
         # Получаем последний загруженный файл из БД
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -753,38 +755,52 @@ def api_send_checks():
         
         if not result:
             conn.close()
+            print("DEBUG: Файл не найден в БД")
             return jsonify({"success": False, "message": "Файл не найден. Сначала загрузите файл."})
         
         file_id, filename = result
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         
-        print(f"DEBUG: file_id = {file_id}")
-        print(f"DEBUG: Обрабатываем файл: {filepath}")
+        print(f"DEBUG: file_id = {file_id}, filename = {filename}, filepath = {filepath}")
         
         # Проверяем существование файла
         if not os.path.exists(filepath):
             conn.close()
+            print(f"DEBUG: Файл не найден на диске: {filepath}")
             return jsonify({"success": False, "message": f"Файл {filename} не найден на диске"})
 
         # Обновляем статус файла на 'processing'
         cursor.execute('UPDATE uploaded_files SET status = ? WHERE id = ?', ('processing', file_id))
         conn.commit()
+        print(f"DEBUG: Статус файла обновлён на 'processing' для file_id={file_id}")
         conn.close()
 
         # Читаем файл
-        if filepath.endswith('.csv'):
-            df = pd.read_csv(filepath)
-        else:
-            df = pd.read_excel(filepath)
+        try:
+            if filepath.endswith('.csv'):
+                df = pd.read_csv(filepath)
+                print("DEBUG: Файл прочитан как CSV")
+            else:
+                df = pd.read_excel(filepath)
+                print("DEBUG: Файл прочитан как Excel")
+        except Exception as read_error:
+            print(f"DEBUG: Ошибка чтения файла: {read_error}")
+            return jsonify({"success": False, "message": f"Ошибка чтения файла: {str(read_error)}"})
 
         print(f"DEBUG: Размер файла: {len(df)} строк")
+        print(f"DEBUG: Оригинальные столбцы: {list(df.columns)}")
 
         # Нормализуем названия столбцов
         df.columns = df.columns.str.strip().str.lower()
+        print(f"DEBUG: Нормализованные столбцы: {list(df.columns)}")
 
         # Проверяем наличие обязательных столбцов
-        if 'телефон' not in df.columns or 'инн' not in df.columns:
-            return jsonify({"success": False, "message": "В файле должны быть столбцы 'телефон' и 'ИНН'"})
+        if 'телефон' not in df.columns:
+            print("DEBUG: Столбец 'телефон' не найден")
+            return jsonify({"success": False, "message": "Столбец 'телефон' не найден. Доступные: " + str(list(df.columns))})
+        if 'инн' not in df.columns:
+            print("DEBUG: Столбец 'инн' не найден")
+            return jsonify({"success": False, "message": "Столбец 'инн' не найден. Доступные: " + str(list(df.columns))})
 
         sent = 0
         errors = 0
@@ -794,21 +810,25 @@ def api_send_checks():
         # Остальные будут обработаны фоново
         batch_size = 100
         total_records = len(df)
+        print(f"DEBUG: batch_size={batch_size}, total_records={total_records}")
         
         for index, row in df.head(batch_size).iterrows():
             phone = str(row['телефон']).strip()
             inn = str(row['инн']).strip()
             phone_formatted = format_phone_for_bankiros(phone)
 
-            print(f"DEBUG: [{index + 1}/{batch_size}] {phone} → {phone_formatted}, ИНН={inn}")
+            print(f"DEBUG: [{index + 1}/{batch_size}] phone='{phone}' → '{phone_formatted}', inn='{inn}'")
 
             result = send_check_to_bankiros(phone_formatted, inn, file_id)
 
             if result['success']:
                 sent += 1
+                print(f"DEBUG: Успех для строки {index + 1}, check_id={result.get('check_id')}")
             else:
                 errors += 1
-                error_details.append(f"Строка {index + 1}: {result.get('error')}")
+                error_msg = result.get('error', 'Неизвестная ошибка')
+                error_details.append(f"Строка {index + 1}: {error_msg}")
+                print(f"DEBUG: Ошибка для строки {index + 1}: {error_msg}")
 
         # Сохраняем промежуточный результат
         conn = sqlite3.connect(DB_PATH)
@@ -819,17 +839,20 @@ def api_send_checks():
             WHERE id = ?
         ''', (sent, errors, file_id))
         conn.commit()
+        print(f"DEBUG: Промежуточный счёт: sent={sent}, errors={errors}")
         conn.close()
 
         # Запускаем фоновую обработку остальных записей
         if total_records > batch_size:
             import threading
+            print(f"DEBUG: Запускаем фоновую обработку для {total_records - batch_size} записей")
             thread = threading.Thread(
                 target=process_remaining_records,
                 args=(file_id, filepath, batch_size)
             )
             thread.daemon = True
             thread.start()
+            print("DEBUG: Фоновая нить запущена")
             
             message = f"Первые {batch_size} записей отправлены! Остальные {total_records - batch_size} обрабатываются в фоне."
         else:
@@ -843,6 +866,7 @@ def api_send_checks():
             ''', ('completed', datetime.now(), file_id))
             conn.commit()
             conn.close()
+            print("DEBUG: Все записи обработаны синхронно")
             message = f"Все {total_records} записей отправлены!"
 
         response_data = {
@@ -856,10 +880,11 @@ def api_send_checks():
         if error_details:
             response_data["error_details"] = error_details[:10]
 
+        print(f"DEBUG: api_send_checks завершена: sent={sent}, errors={errors}, total={total_records}")
         return jsonify(response_data)
 
     except Exception as e:
-        print(f"DEBUG: Критическая ошибка: {str(e)}")
+        print(f"DEBUG: Критическая ошибка в api_send_checks: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "message": f"Ошибка: {str(e)}"})
@@ -867,15 +892,19 @@ def api_send_checks():
 def process_remaining_records(file_id, filepath, start_index):
     """Фоновая обработка оставшихся записей"""
     try:
-        print(f"DEBUG: Начинаем фоновую обработку с индекса {start_index}")
+        print(f"DEBUG: Фоновая нить запущена для file_id={file_id}, start_index={start_index}")
         
         # Читаем файл
         if filepath.endswith('.csv'):
             df = pd.read_csv(filepath)
+            print("DEBUG: Фон: Файл прочитан как CSV")
         else:
             df = pd.read_excel(filepath)
+            print("DEBUG: Фон: Файл прочитан как Excel")
         
         df.columns = df.columns.str.strip().str.lower()
+        remaining_count = len(df) - start_index
+        print(f"DEBUG: Фон: Обрабатываем {remaining_count} оставшихся записей")
         
         sent = 0
         errors = 0
@@ -886,14 +915,16 @@ def process_remaining_records(file_id, filepath, start_index):
             inn = str(row['инн']).strip()
             phone_formatted = format_phone_for_bankiros(phone)
             
-            print(f"DEBUG: Фон [{index + 1}/{len(df)}] {phone_formatted}")
+            print(f"DEBUG: Фон [{index + 1}/{len(df)}] phone='{phone}' → '{phone_formatted}', inn='{inn}'")
             
             result = send_check_to_bankiros(phone_formatted, inn, file_id)
             
             if result['success']:
                 sent += 1
+                print(f"DEBUG: Фон успех для строки {index + 1}, check_id={result.get('check_id')}")
             else:
                 errors += 1
+                print(f"DEBUG: Фон ошибка для строки {index + 1}: {result.get('error')}")
             
             # Обновляем прогресс каждые 10 записей
             if (index - start_index + 1) % 10 == 0:
@@ -905,6 +936,7 @@ def process_remaining_records(file_id, filepath, start_index):
                     WHERE id = ?
                 ''', (sent, errors, file_id))
                 conn.commit()
+                print(f"DEBUG: Фон: Промежуточный счёт после {index + 1}: sent+{sent}, errors+{errors}")
                 conn.close()
                 sent = 0
                 errors = 0
@@ -924,10 +956,10 @@ def process_remaining_records(file_id, filepath, start_index):
         conn.commit()
         conn.close()
         
-        print(f"DEBUG: Фоновая обработка завершена. Отправлено: {sent}, ошибок: {errors}")
+        print(f"DEBUG: Фоновая обработка завершена. Финальный счёт: sent+{sent}, errors+{errors}")
         
     except Exception as e:
-        print(f"DEBUG: Ошибка в фоновой обработке: {str(e)}")
+        print(f"DEBUG: Критическая ошибка в фоновой обработке: {str(e)}")
         import traceback
         traceback.print_exc()
         
@@ -937,9 +969,12 @@ def process_remaining_records(file_id, filepath, start_index):
         cursor.execute('UPDATE uploaded_files SET status = ? WHERE id = ?', ('failed', file_id))
         conn.commit()
         conn.close()
+        print(f"DEBUG: Файл помечен как 'failed' из-за ошибки")
 
 def send_check_to_bankiros(phone, employer_inn, file_id=None):
     """Отправка проверки в Bankiros API"""
+    print(f"DEBUG: send_check_to_bankiros: phone={phone}, inn={employer_inn}, file_id={file_id}")
+    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Token {BANKIROS_TOKEN}"
@@ -955,6 +990,8 @@ def send_check_to_bankiros(phone, employer_inn, file_id=None):
         "postbackUrl": POSTBACK_URL
     }
 
+    print(f"DEBUG: Отправляем payload: {payload}")
+
     try:
         response = requests.post(
             f"{BANKIROS_URL}/offers_partners_v1/partner-check-phone/import",
@@ -963,9 +1000,12 @@ def send_check_to_bankiros(phone, employer_inn, file_id=None):
             timeout=10
         )
 
+        print(f"DEBUG: Response status: {response.status_code}, content: {response.text[:200]}...")
+
         if response.status_code == 200:
             result = response.json()
             check_id = result.get('id')
+            print(f"DEBUG: Получен check_id={check_id}")
 
             # Сохраняем в БД
             conn = sqlite3.connect(DB_PATH)
@@ -981,15 +1021,21 @@ def send_check_to_bankiros(phone, employer_inn, file_id=None):
                     INSERT INTO file_checks (file_id, check_id, phone, employer_inn)
                     VALUES (?, ?, ?, ?)
                 ''', (file_id, check_id, phone, employer_inn))
+                print(f"DEBUG: Сохранена связь file_id={file_id}, check_id={check_id}")
 
             conn.commit()
             conn.close()
 
             return {"success": True, "check_id": check_id}
         else:
-            return {"success": False, "error": f"HTTP {response.status_code}"}
+            error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
+            print(f"DEBUG: Ошибка API: {error_msg}")
+            return {"success": False, "error": error_msg}
 
     except Exception as e:
+        print(f"DEBUG: Исключение в send_check_to_bankiros: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {"success": False, "error": str(e)}
 
 @app.route('/api/download-results')
