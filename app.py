@@ -1127,9 +1127,9 @@ def api_download_file(file_id):
         if 'Дата проверки' not in df.columns:
             df['Дата проверки'] = ''
         
-        # Получаем результаты из БД
+        # Получаем результаты из БД (включая employer_inn для точного матчинга)
         cursor.execute('''
-            SELECT fc.phone, c.check_id, c.status, c.offer_id, c.updated_at
+            SELECT fc.phone, fc.employer_inn, c.check_id, c.status, c.offer_id, c.updated_at
             FROM file_checks fc
             JOIN checks c ON fc.check_id = c.check_id
             WHERE fc.file_id = ?
@@ -1138,11 +1138,13 @@ def api_download_file(file_id):
         results = cursor.fetchall()
         conn.close()
         
-        # Создаем словарь для быстрого поиска
+        # Создаем словарь для быстрого поиска по (phone_key, inn)
         results_dict = {}
-        for phone, check_id, status, offer_id, updated_at in results:
+        for phone, inn, check_id, status, offer_id, updated_at in results:
             phone_key = ''.join(filter(str.isdigit, str(phone)))
-            results_dict[phone_key] = {
+            inn_key = str(inn).strip()
+            composite_key = (phone_key, inn_key)
+            results_dict[composite_key] = {
                 'check_id': check_id,
                 'status': status,
                 'offer_id': offer_id,
@@ -1150,16 +1152,22 @@ def api_download_file(file_id):
             }
         
         # Обновляем DataFrame результатами
+        updated_count = 0
         for index, row in df_normalized.iterrows():
             phone = str(row['телефон']).strip()
+            inn = str(row['инн']).strip()
             phone_key = ''.join(filter(str.isdigit, phone))
+            composite_key = (phone_key, inn)
             
-            if phone_key in results_dict:
-                result = results_dict[phone_key]
+            if composite_key in results_dict:
+                result = results_dict[composite_key]
                 df.at[index, 'Check ID'] = result['check_id']
                 df.at[index, 'Статус проверки'] = result['status'] or 'pending'
                 df.at[index, 'ID МФО'] = result['offer_id'] or ''
                 df.at[index, 'Дата проверки'] = result['updated_at'] or ''
+                updated_count += 1
+        
+        print(f"DEBUG: Обновлено {updated_count} записей из {len(results)} результатов в БД")
 
         # Создаем Excel в памяти
         output = io.BytesIO()
